@@ -25,9 +25,7 @@ def get_news(query, api_key=None, max_articles=20):
     """Fetch news either via NewsAPI (if key provided) or from Google News RSS as fallback."""
     articles = []
     if api_key:
-        url = (
-            "https://newsapi.org/v2/everything"
-        )
+        url = "https://newsapi.org/v2/everything"
         params = {
             "q": query,
             "sortBy": "publishedAt",
@@ -53,34 +51,58 @@ def get_news(query, api_key=None, max_articles=20):
 
     if not articles:
         # Fallback: Google News RSS (no API key required)
-        q = requests.utils.quote(query)
-        rss_url = f"https://news.google.com/rss/search?q={q}+stock+OR+finance&hl=en-US&gl=US&ceid=US:en"
         try:
-            feed = feedparser.parse(rss_url)
-            for entry in feed.entries[:max_articles]:
-                published = getattr(entry, 'published', getattr(entry, 'updated', None))
-                articles.append({
-                    "title": entry.get("title"),
-                    "description": entry.get("summary", None),
-                    "url": entry.get("link"),
-                    "publishedAt": published,
-                    "source": entry.get("source", {}).get("title") if entry.get("source") else None,
-                })
+            import urllib.parse
+            q = urllib.parse.quote(query)
+            rss_url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
+            
+            # Use requests to fetch RSS content first
+            response = requests.get(rss_url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
+            response.raise_for_status()
+            
+            # Parse the RSS feed
+            feed = feedparser.parse(response.content)
+            
+            if feed.entries:
+                for entry in feed.entries[:max_articles]:
+                    # Get published date
+                    published = None
+                    if hasattr(entry, 'published'):
+                        published = entry.published
+                    elif hasattr(entry, 'updated'):
+                        published = entry.updated
+                    
+                    # Get description/summary
+                    description = None
+                    if hasattr(entry, 'summary'):
+                        description = entry.summary
+                    elif hasattr(entry, 'description'):
+                        description = entry.description
+                    
+                    articles.append({
+                        "title": entry.get("title", ""),
+                        "description": description,
+                        "url": entry.get("link", ""),
+                        "publishedAt": published,
+                        "source": "Google News",
+                    })
+            else:
+                st.info(f"No RSS feed entries found for '{query}'. Try a different search term.")
         except Exception as e:
-            st.error(f"Failed to fetch RSS news: {e}")
+            st.error(f"Failed to fetch RSS news: {str(e)}")
 
     # Normalize publishedAt to datetime
     for a in articles:
         if a.get("publishedAt"):
             try:
-                a["publishedAt"] = pd.to_datetime(a["publishedAt"]).tz_convert(None)
+                a["publishedAt"] = pd.to_datetime(a["publishedAt"], utc=True).tz_convert(None)
             except Exception:
                 try:
                     a["publishedAt"] = pd.to_datetime(a["publishedAt"])
                 except Exception:
-                    a["publishedAt"] = None
+                    a["publishedAt"] = pd.Timestamp.now()
         else:
-            a["publishedAt"] = None
+            a["publishedAt"] = pd.Timestamp.now()
 
     return pd.DataFrame(articles)
 
