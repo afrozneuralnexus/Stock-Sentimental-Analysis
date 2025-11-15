@@ -46,17 +46,20 @@ def get_news(query, api_key=None, max_articles=20):
             data = r.json()
             for a in data.get("articles", []):
                 articles.append({
-                    "title": a.get("title"),
-                    "description": a.get("description"),
-                    "url": a.get("url"),
-                    "publishedAt": a.get("publishedAt"),
-                    "source": a.get("source", {}).get("name"),
+                    "title": a.get("title", ""),
+                    "description": a.get("description", ""),
+                    "url": a.get("url", ""),
+                    "publishedAt": a.get("publishedAt", ""),
+                    "source": a.get("source", {}).get("name", "Unknown"),
                 })
         except Exception as e:
             st.warning(f"NewsAPI failed: {e}. Using RSS fallback.")
 
     if articles:
-        return pd.DataFrame(articles)
+        df = pd.DataFrame(articles)
+        df["publishedAt"] = pd.to_datetime(df["publishedAt"], errors="coerce")
+        df["publishedAt"] = df["publishedAt"].fillna(pd.Timestamp.now())
+        return df
 
     # ------------------------------------
     # 2) RSS fallback
@@ -96,7 +99,8 @@ def get_news(query, api_key=None, max_articles=20):
             break
 
     if not feed_entries:
-        return pd.DataFrame([])
+        # Return empty DataFrame with correct columns
+        return pd.DataFrame(columns=["title", "description", "url", "publishedAt", "source"])
 
     # Parse RSS results
     for entry in feed_entries[:max_articles]:
@@ -137,6 +141,8 @@ def compute_sentiment(df):
         return analyzer.polarity_scores(text)["compound"]
 
     if df is None or df.empty:
+        # Return empty DataFrame with sentiment column
+        df = pd.DataFrame(columns=["title", "description", "url", "publishedAt", "source", "sentiment", "date"])
         return df
 
     df = df.copy()
@@ -215,7 +221,7 @@ with col1:
     end_date = st.date_input("End date", value=datetime.now().date())
 
 with col2:
-    news_api_key = st.text_input("NewsAPI Key (optional)")
+    news_api_key = st.text_input("NewsAPI Key (optional)", type="password")
     max_news = st.slider("Max news articles", 5, 50, 20)
 
 # ----------------------------------------------------
@@ -234,16 +240,37 @@ if st.button("Run analysis"):
         news_df = compute_sentiment(news_df)
 
         st.subheader("📄 News articles")
-        st.dataframe(news_df[["publishedAt", "title", "source", "sentiment"]].sort_values("publishedAt", ascending=False))
+        
+        # Check if news_df has data and the required columns
+        if news_df.empty or len(news_df) == 0:
+            st.info("No news articles found. The model will run without sentiment data.")
+            # Create a minimal display
+            st.dataframe(pd.DataFrame({"message": ["No articles found"]}))
+        else:
+            # Safely display available columns
+            display_cols = []
+            for col in ["publishedAt", "title", "source", "sentiment"]:
+                if col in news_df.columns:
+                    display_cols.append(col)
+            
+            if display_cols:
+                display_df = news_df[display_cols].copy()
+                if "publishedAt" in display_df.columns:
+                    display_df = display_df.sort_values("publishedAt", ascending=False)
+                st.dataframe(display_df)
+            else:
+                st.warning("News data retrieved but missing expected columns.")
+                st.dataframe(news_df.head())
 
         # 3) Features
         features = build_features(price_df, news_df, lookback=5)
         if features.empty:
-            st.error("Insufficient data.")
+            st.error("Insufficient data after feature engineering.")
             st.stop()
 
-        X = features.drop(columns=["Date", "Open", "High", "Low", "Close", "Adj Close",
-                                   "Volume", "target_next_close"], errors="ignore")
+        # Prepare X and y
+        cols_to_drop = ["Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "target_next_close"]
+        X = features.drop(columns=[c for c in cols_to_drop if c in features.columns], errors="ignore")
         y = features["target_next_close"]
 
         # 4) Model
@@ -256,35 +283,48 @@ if st.button("Run analysis"):
         rmse = math.sqrt(mean_squared_error(y_test, preds))
 
         st.subheader("📊 Model Performance")
-        st.write(f"**MAE:** {mae:.4f}")
-        st.write(f"**RMSE:** {rmse:.4f}")
+        col_m1, col_m2 = st.columns(2)
+        col_m1.metric("MAE", f"{mae:.4f}")
+        col_m2.metric("RMSE", f"{rmse:.4f}")
 
         # 5) Next-day forecast
         latest = X.iloc[[-1]]
         next_price = model.predict(latest)[0]
 
         st.subheader("📈 Next-Day Forecast")
-        st.metric(f"Predicted next close for {ticker}", f"{next_price:.2f}")
+        st.metric(f"Predicted next close for {ticker}", f"${next_price:.2f}")
 
         # 6) Plot Actual vs Predicted
         test_plot = pd.DataFrame({
-            "Date": features.loc[X_test.index, "Date"],
+            "Date": features.loc[X_test.index, "Date"].values,
             "Actual": y_test.values,
             "Predicted": preds
         })
 
-        fig = px.line(test_plot, x="Date", y=["Actual", "Predicted"], title="Actual vs Predicted")
+        fig = px.line(test_plot, x="Date", y=["Actual", "Predicted"], 
+                     title="Actual vs Predicted Prices",
+                     labels={"value": "Price", "variable": "Type"})
         st.plotly_chart(fig, use_container_width=True)
 
         # 7) Price chart
-        fig2 = px.line(price_df, x="Date", y="Close", title=f"{ticker} Close Price")
+        fig2 = px.line(price_df, x="Date", y="Close", 
+                      title=f"{ticker} Historical Close Price")
         st.plotly_chart(fig2, use_container_width=True)
 
         # 8) Downloads
-        st.download_button("Download news CSV", news_df.to_csv(index=False), f"{ticker}_news.csv")
-        st.download_button("Download price CSV", price_df.to_csv(index=False), f"{ticker}_prices.csv")
+        col_d1, col_d2 = st.columns(2)
+        with col_d1:
+            st.download_button("📥 Download News CSV", 
+                             news_df.to_csv(index=False), 
+                             f"{ticker}_news.csv",
+                             mime="text/csv")
+        with col_d2:
+            st.download_button("📥 Download Price CSV", 
+                             price_df.to_csv(index=False), 
+                             f"{ticker}_prices.csv",
+                             mime="text/csv")
 
-        st.success("Done!")
+        st.success("✅ Analysis complete!")
 
 st.markdown("---")
-st.write("This app forecasts the next closing price using RandomForest + news sentiment.")
+st.caption("This app forecasts the next closing price using RandomForest + news sentiment analysis.")
