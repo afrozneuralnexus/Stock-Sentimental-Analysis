@@ -110,6 +110,9 @@ def fetch_price_data(ticker, start, end):
     if df.empty:
         return df
     df = df.reset_index()
+    # Flatten column names if MultiIndex
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [col[0] if col[0] != '' else col[1] for col in df.columns]
     df["Date"] = pd.to_datetime(df["Date"])
     return df
 
@@ -187,7 +190,8 @@ if st.button("Run analysis"):
                 model.fit(X_train, y_train)
                 preds = model.predict(X_test)
                 mae = mean_absolute_error(y_test, preds)
-                rmse = mean_squared_error(y_test, preds, squared=False)
+                mse = mean_squared_error(y_test, preds)
+                rmse = math.sqrt(mse)
 
                 st.subheader("Model performance (holdout)")
                 st.write(f"MAE: {mae:.4f}  —  RMSE: {rmse:.4f}")
@@ -209,7 +213,7 @@ if st.button("Run analysis"):
 
                 # show interactive price chart
                 st.subheader("Price chart")
-                fig2 = px.line(price_df, x="Date", y=["Close"], title=f"{ticker} Close Price")
+                fig2 = px.line(price_df, x="Date", y="Close", title=f"{ticker} Close Price")
                 st.plotly_chart(fig2, use_container_width=True)
 
                 # downloadable CSVs
